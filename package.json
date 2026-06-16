@@ -1,0 +1,14 @@
+{
+  "name": "migrate-playlist-yt",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node migrate-playlist.js",
+    "auth-url": "node migrate-playlist.js auth-url",
+    "exchange-code": "node migrate-playlist.js exchange-code"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}

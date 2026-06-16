@@ -1,0 +1,16 @@
+node_modules/
+
+.env
+.env.*
+!.env.example
+
+client_secret.json
+.youtube-refresh-tokens.json
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+.DS_Store
+Thumbs.db
