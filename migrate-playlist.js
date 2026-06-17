@@ -1,11 +1,14 @@
+import dotenv from "dotenv";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { google } from "googleapis";
 
+dotenv.config();
+
 const SCOPES = ["https://www.googleapis.com/auth/youtube"];
-const DEFAULT_REDIRECT_URI = "http://localhost:3000/oauth2callback";
+const DEFAULT_REDIRECT_URI = "http://localhost:3000";
 const TOKEN_STORE_FILE = fileURLToPath(new URL(".youtube-refresh-tokens.json", import.meta.url));
 
 function requireEnv(name, fallback = undefined) {
@@ -24,7 +27,8 @@ function getConfig() {
     sourceRefreshToken: process.env.SOURCE_REFRESH_TOKEN,
     destRefreshToken: process.env.DEST_REFRESH_TOKEN,
     sourcePlaylistId: process.env.SOURCE_PLAYLIST_ID,
-    destPlaylistTitle: process.env.DEST_PLAYLIST_TITLE || "Mi Playlist Migrada",
+    destPlaylistTitle: process.env.DEST_PLAYLIST_TITLE,
+    destPlaylistId: process.env.DEST_PLAYLIST_ID,
     destPrivacyStatus: process.env.DEST_PRIVACY_STATUS || "private",
   };
 }
@@ -46,14 +50,40 @@ async function saveTokenStore(store) {
   await writeFile(TOKEN_STORE_FILE, `${JSON.stringify(store, null, 2)}\n`, "utf8");
 }
 
+function buildExportFileName(playlistId) {
+  // ISO 8601 trae `:` y `.`, que no son válidos en nombres de archivo en Windows.
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `playlist-${playlistId}-${timestamp}.json`;
+}
+
+async function savePlaylistExport(playlistInfo, items) {
+  const fileName = buildExportFileName(playlistInfo.id);
+  const filePath = fileURLToPath(new URL(fileName, import.meta.url));
+
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    playlist: playlistInfo,
+    totalVideos: items.length,
+    videos: items,
+  };
+
+  await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+
+  return filePath;
+}
+
 function openUrl(url) {
   const platform = process.platform;
 
   if (platform === "win32") {
-    spawn("cmd", ["/c", "start", "", url], {
+    // En Windows, cmd interpreta `&` como separador de comandos y corta la URL
+    // en el primer parámetro. Hay que pasarla entre comillas como un solo
+    // argumento y desactivar el escaping propio de Node con windowsVerbatimArguments.
+    spawn("cmd", ["/c", "start", '""', `"${url}"`], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
+      windowsVerbatimArguments: true,
     }).unref();
     return;
   }
@@ -137,30 +167,60 @@ function createYoutubeClient(config, refreshToken) {
   };
 }
 
+async function getPlaylistInfo(youtube, playlistId) {
+  const response = await youtube.playlists.list({
+    part: "snippet,contentDetails",
+    id: playlistId,
+    maxResults: 1,
+  });
+
+  const playlist = response.data.items?.[0];
+  if (!playlist) {
+    throw new Error(`No se encontró la playlist ${playlistId}`);
+  }
+
+  return {
+    id: playlist.id,
+    title: playlist.snippet?.title || "",
+    description: playlist.snippet?.description || "",
+    channelTitle: playlist.snippet?.channelTitle || "",
+    itemCount: playlist.contentDetails?.itemCount ?? null,
+  };
+}
+
 async function getPlaylistItems(youtube, playlistId) {
-  const videoIds = [];
+  const items = [];
   let pageToken;
 
   do {
     const response = await youtube.playlistItems.list({
-      part: "snippet",
+      part: "snippet,contentDetails",
       playlistId,
       maxResults: 50,
       pageToken,
     });
 
-    const items = response.data.items || [];
-    for (const item of items) {
+    const pageItems = response.data.items || [];
+    for (const item of pageItems) {
       const videoId = item?.snippet?.resourceId?.videoId;
-      if (videoId) {
-        videoIds.push(videoId);
+      if (!videoId) {
+        continue;
       }
+
+      items.push({
+        videoId,
+        title: item?.snippet?.title || "",
+        channelTitle: item?.snippet?.videoOwnerChannelTitle || "",
+        position: item?.snippet?.position ?? null,
+        publishedAt: item?.contentDetails?.videoPublishedAt || null,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+      });
     }
 
     pageToken = response.data.nextPageToken || undefined;
   } while (pageToken);
 
-  return videoIds;
+  return items;
 }
 
 async function createPlaylist(youtube, title, privacyStatus) {
@@ -193,6 +253,7 @@ function buildAuthUrl(config) {
   return oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
+    response_type: "code",
     scope: SCOPES,
   });
 }
@@ -209,6 +270,7 @@ async function authorizeAccount(config, accountLabel) {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
+    response_type: "code",
     scope: SCOPES,
   });
 
@@ -244,7 +306,8 @@ async function resolveRefreshToken(config, accountLabel, envToken, store) {
   return refreshToken;
 }
 
-async function migrate(config) {
+// FASE 1: lee la playlist origen y la guarda en un JSON con timestamp.
+async function exportPlaylist(config) {
   if (!config.sourcePlaylistId) {
     throw new Error("Falta SOURCE_PLAYLIST_ID");
   }
@@ -256,42 +319,146 @@ async function migrate(config) {
     config.sourceRefreshToken,
     tokenStore
   );
+  const { youtube: sourceYoutube } = createYoutubeClient(
+    config,
+    sourceRefreshToken
+  );
+
+  console.log("Leyendo playlist origen...");
+  const playlistInfo = await getPlaylistInfo(sourceYoutube, config.sourcePlaylistId);
+  const items = await getPlaylistItems(sourceYoutube, config.sourcePlaylistId);
+  console.log(`Playlist origen: ${playlistInfo.title}`);
+  console.log(`Videos encontrados: ${items.length}`);
+
+  const exportPath = await savePlaylistExport(playlistInfo, items);
+  console.log(`Backup guardado en: ${exportPath}`);
+
+  return exportPath;
+}
+
+async function loadPlaylistExport(filePath) {
+  const raw = await readFile(filePath, "utf8");
+  const data = JSON.parse(raw);
+
+  if (!Array.isArray(data.videos)) {
+    throw new Error(`El archivo ${filePath} no tiene una lista de videos válida`);
+  }
+
+  return data;
+}
+
+// La API de YouTube devuelve quotaExceeded/dailyLimitExceeded cuando se agota
+// la cuota diaria (10.000 unidades; cada insert cuesta 50 → ~200 videos/día).
+function isQuotaError(error) {
+  const reasons =
+    error?.errors || error?.response?.data?.error?.errors || [];
+  const byReason = reasons.some(
+    (e) => e.reason === "quotaExceeded" || e.reason === "dailyLimitExceeded"
+  );
+  return byReason || /exceeded your.*quota/i.test(error?.message || "");
+}
+
+// FASE 2: toma los datos de un backup y los recrea en la cuenta destino.
+async function importPlaylist(config, data) {
+  const tokenStore = await loadTokenStore();
   const destRefreshToken = await resolveRefreshToken(
     config,
     "dest",
     config.destRefreshToken,
     tokenStore
   );
-
-  const { youtube: sourceYoutube } = createYoutubeClient(
-    config,
-    sourceRefreshToken
-  );
   const { youtube: destYoutube } = createYoutubeClient(
     config,
     destRefreshToken
   );
 
-  console.log("Leyendo playlist origen...");
-  const videoIds = await getPlaylistItems(sourceYoutube, config.sourcePlaylistId);
-  console.log(`Videos encontrados: ${videoIds.length}`);
+  let destinationPlaylistId = config.destPlaylistId;
+  let existingVideoIds = new Set();
 
-  console.log("Creando playlist destino...");
-  const destinationPlaylistId = await createPlaylist(
-    destYoutube,
-    config.destPlaylistTitle,
-    config.destPrivacyStatus
-  );
-  console.log(`Playlist creada: ${destinationPlaylistId}`);
-
-  for (let index = 0; index < videoIds.length; index += 1) {
-    const videoId = videoIds[index];
-    await addVideoToPlaylist(destYoutube, destinationPlaylistId, videoId);
-    console.log(`Agregado ${index + 1}/${videoIds.length}: ${videoId}`);
+  if (destinationPlaylistId) {
+    // Reanudar sobre una playlist existente: leemos qué ya tiene para no duplicar.
+    console.log(`Usando playlist destino existente: ${destinationPlaylistId}`);
+    const existing = await getPlaylistItems(destYoutube, destinationPlaylistId);
+    existingVideoIds = new Set(existing.map((video) => video.videoId));
+    console.log(`Videos ya presentes en el destino: ${existingVideoIds.size}`);
+  } else {
+    const title =
+      config.destPlaylistTitle || data.playlist?.title || "Mi Playlist Migrada";
+    console.log("Creando playlist destino...");
+    destinationPlaylistId = await createPlaylist(
+      destYoutube,
+      title,
+      config.destPrivacyStatus
+    );
+    console.log(`Playlist creada: ${destinationPlaylistId}`);
   }
 
-  console.log("Migración completada.");
-  console.log(`Playlist destino: ${destinationPlaylistId}`);
+  const videos = data.videos;
+  const failed = [];
+  let added = 0;
+  let skipped = 0;
+  let quotaHit = false;
+
+  for (let index = 0; index < videos.length; index += 1) {
+    const { videoId, title: videoTitle } = videos[index];
+    const label = videoTitle || videoId;
+
+    if (existingVideoIds.has(videoId)) {
+      skipped += 1;
+      console.log(`Ya existe ${index + 1}/${videos.length}: ${label}`);
+      continue;
+    }
+
+    try {
+      await addVideoToPlaylist(destYoutube, destinationPlaylistId, videoId);
+      added += 1;
+      console.log(`Agregado ${index + 1}/${videos.length}: ${label}`);
+    } catch (error) {
+      if (isQuotaError(error)) {
+        // No tiene sentido seguir: el resto fallaría igual. Cortamos limpio.
+        quotaHit = true;
+        console.error(
+          `\nCuota diaria de la API agotada en el video ${index + 1}/${videos.length}.`
+        );
+        break;
+      }
+      // Un video borrado/privado no debe abortar toda la importación.
+      failed.push({ videoId, title: videoTitle, reason: error?.message || String(error) });
+      console.warn(`Falló ${index + 1}/${videos.length}: ${label} (${error?.message || error})`);
+    }
+  }
+
+  console.log("\nResumen:");
+  console.log(`  Playlist destino: ${destinationPlaylistId}`);
+  console.log(`  Agregados ahora: ${added}`);
+  console.log(`  Ya existían (saltados): ${skipped}`);
+  console.log(`  Fallidos (borrados/privados): ${failed.length}`);
+
+  if (quotaHit) {
+    console.log(
+      "\nLa cuota se reinicia a medianoche hora del Pacífico (PT)."
+    );
+    console.log("Mañana, para CONTINUAR sin duplicar, corré:");
+    console.log(
+      `  node migrate-playlist.js import "<archivo.json>" ${destinationPlaylistId}`
+    );
+  }
+
+  return { destinationPlaylistId, added, skipped, failed, quotaHit };
+}
+
+async function importPlaylistFromFile(config, filePath) {
+  console.log(`Leyendo backup: ${filePath}`);
+  const data = await loadPlaylistExport(filePath);
+  console.log(`Videos en el backup: ${data.videos.length}`);
+  return importPlaylist(config, data);
+}
+
+// Atajo: exporta y luego importa desde el archivo recién creado.
+// El JSON es la única fuente de verdad, así migrate e import se comportan igual.
+async function migrate(config) {
+  const exportPath = await exportPlaylist(config);
+  return importPlaylistFromFile(config, exportPath);
 }
 
 async function main() {
@@ -300,6 +467,25 @@ async function main() {
 
   if (!command || command === "migrate") {
     await migrate(config);
+    return;
+  }
+
+  if (command === "export") {
+    await exportPlaylist(config);
+    return;
+  }
+
+  if (command === "import") {
+    if (!account) {
+      throw new Error(
+        "Uso: node migrate-playlist.js import <archivo.json> [destPlaylistId]"
+      );
+    }
+    // Si pasás un destPlaylistId, importa sobre esa playlist (modo reanudar).
+    if (value) {
+      config.destPlaylistId = value;
+    }
+    await importPlaylistFromFile(config, account);
     return;
   }
 
@@ -324,6 +510,8 @@ async function main() {
     [
       "Comandos disponibles:",
       "  node migrate-playlist.js migrate",
+      "  node migrate-playlist.js export",
+      "  node migrate-playlist.js import <archivo.json> [destPlaylistId]",
       "  node migrate-playlist.js auth-url",
       "  node migrate-playlist.js exchange-code source CODIGO",
       "  node migrate-playlist.js exchange-code dest CODIGO",

@@ -184,7 +184,52 @@ async function addVideoToPlaylist(playlistId, videoId) {
 }
 ```
 
-## 13. Ejecutar el flujo completo
+## 13. Cuotas de la API y reanudación
+
+Antes de migrar playlists grandes, tenés que entender el límite más importante de la YouTube Data API: la **cuota diaria**.
+
+### Cuánto cuesta cada operación
+
+La API no limita por cantidad de llamadas, sino por **unidades**. Tenés **10.000 unidades por día** (cuota gratuita por defecto) y cada operación gasta distinto:
+
+| Operación | Método | Costo |
+| --- | --- | --- |
+| Leer una página (hasta 50 videos) | `playlistItems.list` | 1 unidad |
+| Crear una playlist | `playlists.insert` | 50 unidades |
+| Agregar un video | `playlistItems.insert` | 50 unidades |
+
+### El techo práctico
+
+Como agregar cada video cuesta 50 unidades:
+
+```
+10.000 unidades ÷ 50 por video ≈ 200 videos por día
+```
+
+Si tu playlist tiene más de ~200 videos, **necesitás varios días** para migrarla completa. No es un bug: es el límite de Google. Cuando lo superás, la API devuelve el error `quotaExceeded`.
+
+La cuota se **reinicia a medianoche hora del Pacífico (PT)**. Si necesitás más, podés solicitar un aumento desde Google Cloud Console (es un trámite que Google revisa manualmente).
+
+### Reanudar sin duplicar (idempotencia)
+
+Si la migración se corta a la mitad (por cuota o cualquier otro error), no querés empezar de cero ni duplicar los videos ya cargados. La solución es **comparar contra el estado real del destino** antes de agregar:
+
+1. Leés los videos que la playlist destino **ya tiene** (`playlistItems.list`).
+2. Recorrés la lista origen y, por cada video, preguntás si **ya está** en el destino.
+3. Si está, lo saltás; si no, lo agregás.
+
+Así podés correr la importación las veces que necesites: siempre completa lo que falta y nada más.
+
+Y lo mejor es el costo: **leer es 50 veces más barato que escribir**. Por ejemplo, para saltar 181 videos ya cargados:
+
+| Acción | Cálculo | Costo |
+| --- | --- | --- |
+| Leer el destino para saber qué saltar | 181 ÷ 50 ≈ 4 páginas | 4 unidades |
+| Re-agregarlos a ciegas (sin reanudar) | 181 × 50 | 9.050 unidades |
+
+Pagás **4 unidades** de lectura para ahorrarte **9.050** de escritura inútil (y, de paso, evitás los duplicados). Esa es la diferencia entre un proceso fiable y uno frágil.
+
+## 14. Ejecutar el flujo completo
 
 ```js
 async function migratePlaylist() {
@@ -202,7 +247,7 @@ async function migratePlaylist() {
 await migratePlaylist();
 ```
 
-## 14. Notas importantes
+## 15. Notas importantes
 
 - La primera vez podés dejar que el script haga toda la autorización y guarde los tokens por vos.
 - Si preferís, también podés seguir usando los comandos separados para generar la URL e intercambiar el código.
@@ -211,7 +256,7 @@ await migratePlaylist();
 - Una API key sola no sirve para escribir en la cuenta.
 - Este método sirve también para playlists grandes, como migraciones de cientos de videos.
 
-## 15. Resumen rápido
+## 16. Resumen rápido
 
 1. Creás credenciales OAuth en Google Cloud.
 2. Instalás `googleapis`.
@@ -220,7 +265,7 @@ await migratePlaylist();
 5. Creás una playlist nueva.
 6. Copiás los videos a la playlist destino.
 
-## 16. Conclusión
+## 17. Conclusión
 
 Este enfoque es:
 

@@ -9,6 +9,7 @@
     "exchange-code": "node migrate-playlist.js exchange-code"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "googleapis": "^144.0.0"
   }
 }
