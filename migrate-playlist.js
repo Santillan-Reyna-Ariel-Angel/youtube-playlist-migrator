@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { google } from "googleapis";
 
@@ -9,6 +10,16 @@ dotenv.config();
 
 const SCOPES = ["https://www.googleapis.com/auth/youtube"];
 const DEFAULT_REDIRECT_URI = "http://localhost:3000";
+const ACCOUNT_PROMPTS = {
+  source: {
+    title: "CUENTA ORIGEN",
+    detail: "la cuenta de YouTube de donde se LEERÁ la playlist a copiar",
+  },
+  dest: {
+    title: "CUENTA DESTINO",
+    detail: "la cuenta de YouTube donde se CREARÁ la playlist nueva",
+  },
+};
 const TOKEN_STORE_FILE = fileURLToPath(new URL(".youtube-refresh-tokens.json", import.meta.url));
 
 function requireEnv(name, fallback = undefined) {
@@ -26,7 +37,6 @@ function getConfig() {
     redirectUri: requireEnv("GOOGLE_REDIRECT_URI", DEFAULT_REDIRECT_URI),
     sourceRefreshToken: process.env.SOURCE_REFRESH_TOKEN,
     destRefreshToken: process.env.DEST_REFRESH_TOKEN,
-    sourcePlaylistId: process.env.SOURCE_PLAYLIST_ID,
     destPlaylistTitle: process.env.DEST_PLAYLIST_TITLE,
     destPlaylistId: process.env.DEST_PLAYLIST_ID,
     destPrivacyStatus: process.env.DEST_PRIVACY_STATUS || "private",
@@ -51,18 +61,33 @@ async function saveTokenStore(store) {
 }
 
 function buildExportFileName(playlistId) {
-  // ISO 8601 trae `:` y `.`, que no son válidos en nombres de archivo en Windows.
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `playlist-${playlistId}-${timestamp}.json`;
+  // Un único archivo por playlist: el ID es la clave que permite reanudar.
+  return `playlist-${playlistId}.json`;
+}
+
+function getExportPath(playlistId) {
+  return fileURLToPath(new URL(buildExportFileName(playlistId), import.meta.url));
 }
 
 async function savePlaylistExport(playlistInfo, items) {
-  const fileName = buildExportFileName(playlistInfo.id);
-  const filePath = fileURLToPath(new URL(fileName, import.meta.url));
+  const filePath = getExportPath(playlistInfo.id);
+
+  // Si ya existe un backup de esta playlist, preservamos el destPlaylistId
+  // guardado en una corrida anterior para no perder la reanudación automática.
+  let previousDestPlaylistId = null;
+  try {
+    const previous = JSON.parse(await readFile(filePath, "utf8"));
+    previousDestPlaylistId = previous.destPlaylistId ?? null;
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
 
   const payload = {
     exportedAt: new Date().toISOString(),
     playlist: playlistInfo,
+    destPlaylistId: previousDestPlaylistId,
     totalVideos: items.length,
     videos: items,
   };
@@ -70,6 +95,36 @@ async function savePlaylistExport(playlistInfo, items) {
   await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 
   return filePath;
+}
+
+async function promptInput(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(question);
+    return answer.trim();
+  } finally {
+    rl.close();
+  }
+}
+
+function extractPlaylistId(input) {
+  const value = (input || "").trim();
+  // Acepta una URL (https://www.youtube.com/playlist?list=PLxxxx) o el ID pelado.
+  const match = value.match(/[?&]list=([^&]+)/);
+  return match ? match[1] : value;
+}
+
+async function resolveSourcePlaylistId() {
+  const answer = await promptInput(
+    "Ingresá el ID o la URL de la playlist ORIGEN: "
+  );
+  const playlistId = extractPlaylistId(answer);
+
+  if (!playlistId) {
+    throw new Error("No ingresaste un ID de playlist válido.");
+  }
+
+  return playlistId;
 }
 
 function openUrl(url) {
@@ -274,7 +329,22 @@ async function authorizeAccount(config, accountLabel) {
     scope: SCOPES,
   });
 
-  console.log(`Autorizando cuenta ${accountLabel}...`);
+  const prompt = ACCOUNT_PROMPTS[accountLabel] || {
+    title: accountLabel.toUpperCase(),
+    detail: "",
+  };
+
+  console.log("\n============================================================");
+  console.log(`  Iniciá sesión con tu ${prompt.title}.`);
+  if (prompt.detail) {
+    console.log(`  Es ${prompt.detail}.`);
+  }
+  console.log("  En unos segundos se abrirá el navegador...");
+  console.log("============================================================\n");
+
+  // Pequeña pausa para que el usuario alcance a leer antes de que se abra el navegador.
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+
   const code = await getAuthCodeFromBrowser(config, authUrl);
   const tokens = await exchangeCodeForTokens(config, code);
 
@@ -306,11 +376,9 @@ async function resolveRefreshToken(config, accountLabel, envToken, store) {
   return refreshToken;
 }
 
-// FASE 1: lee la playlist origen y la guarda en un JSON con timestamp.
+// FASE 1: lee la playlist origen y la guarda en un JSON (un archivo por playlist).
 async function exportPlaylist(config) {
-  if (!config.sourcePlaylistId) {
-    throw new Error("Falta SOURCE_PLAYLIST_ID");
-  }
+  const sourcePlaylistId = await resolveSourcePlaylistId();
 
   const tokenStore = await loadTokenStore();
   const sourceRefreshToken = await resolveRefreshToken(
@@ -325,8 +393,8 @@ async function exportPlaylist(config) {
   );
 
   console.log("Leyendo playlist origen...");
-  const playlistInfo = await getPlaylistInfo(sourceYoutube, config.sourcePlaylistId);
-  const items = await getPlaylistItems(sourceYoutube, config.sourcePlaylistId);
+  const playlistInfo = await getPlaylistInfo(sourceYoutube, sourcePlaylistId);
+  const items = await getPlaylistItems(sourceYoutube, sourcePlaylistId);
   console.log(`Playlist origen: ${playlistInfo.title}`);
   console.log(`Videos encontrados: ${items.length}`);
 
@@ -372,7 +440,8 @@ async function importPlaylist(config, data) {
     destRefreshToken
   );
 
-  let destinationPlaylistId = config.destPlaylistId;
+  // Prioridad: el arg/env explícito gana sobre el guardado en el JSON.
+  let destinationPlaylistId = config.destPlaylistId || data.destPlaylistId;
   let existingVideoIds = new Set();
 
   if (destinationPlaylistId) {
@@ -438,10 +507,13 @@ async function importPlaylist(config, data) {
     console.log(
       "\nLa cuota se reinicia a medianoche hora del Pacífico (PT)."
     );
-    console.log("Mañana, para CONTINUAR sin duplicar, corré:");
-    console.log(
-      `  node migrate-playlist.js import "<archivo.json>" ${destinationPlaylistId}`
-    );
+    console.log("Mañana, para CONTINUAR sin duplicar, corré `pnpm run start`");
+    const sourceId = data.playlist?.id;
+    if (sourceId) {
+      console.log(`y volvé a ingresar el mismo ID de playlist: ${sourceId}`);
+    } else {
+      console.log("y volvé a ingresar el mismo ID de playlist.");
+    }
   }
 
   return { destinationPlaylistId, added, skipped, failed, quotaHit };
@@ -451,12 +523,33 @@ async function importPlaylistFromFile(config, filePath) {
   console.log(`Leyendo backup: ${filePath}`);
   const data = await loadPlaylistExport(filePath);
   console.log(`Videos en el backup: ${data.videos.length}`);
-  return importPlaylist(config, data);
+
+  const result = await importPlaylist(config, data);
+
+  // Guardamos el destPlaylistId en el JSON para reanudar solo la próxima vez.
+  if (
+    result.destinationPlaylistId &&
+    data.destPlaylistId !== result.destinationPlaylistId
+  ) {
+    data.destPlaylistId = result.destinationPlaylistId;
+    await writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  }
+
+  return result;
 }
 
 // Atajo: exporta y luego importa desde el archivo recién creado.
 // El JSON es la única fuente de verdad, así migrate e import se comportan igual.
 async function migrate(config) {
+  // SETUP: autenticamos ambas cuentas PRIMERO (el login no consume cuota de la API),
+  // de corrido, para no frenar la migración a mitad de camino pidiendo un segundo login.
+  // resolveRefreshToken cachea los tokens en disco; las fases siguientes los reutilizan,
+  // así que aunque el ID se ingrese mal después, no hay que volver a loguearse.
+  const tokenStore = await loadTokenStore();
+  await resolveRefreshToken(config, "source", config.sourceRefreshToken, tokenStore);
+  await resolveRefreshToken(config, "dest", config.destRefreshToken, tokenStore);
+
+  // EJECUCIÓN: ya autenticados, pedimos el ID y migramos.
   const exportPath = await exportPlaylist(config);
   return importPlaylistFromFile(config, exportPath);
 }

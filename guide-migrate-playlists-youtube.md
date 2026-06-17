@@ -35,156 +35,83 @@ Luego, dentro de la misma pantalla(consentimiento de OAuth), selecciona la opcio
 4. En **Nombre**, poné un nombre descriptivo, por ejemplo: `Credenciales Node App`.
 5. Hacé clic en **Crear**.
 6. En la ventana emergente, hacé clic en **Descargar JSON**.
-7. Guardá el archivo en la carpeta del proyecto. Si querés, podés renombrarlo a `credentials.json` para usarlo más fácil.
+7. Guardá el archivo. De ahí vas a copiar el **Client ID** y el **Client Secret** al archivo `.env` en el próximo paso. El script **no lee este JSON directamente**: solo te sirve como fuente de esos dos valores.
 
-## Paso 4: Instalación de herramientas (JavaScript/Node.js)
+## Paso 4: Configurar las variables de entorno
 
-Para usar estas credenciales en un proyecto de JavaScript con Node.js, abrí la terminal en la carpeta del proyecto e instalá la librería oficial de Google.
-
-Con `npm`:
+El script lee las credenciales desde variables de entorno, **no** desde el JSON descargado. Creá un archivo `.env` en la raíz del proyecto. Lo mínimo son el **Client ID** y el **Client Secret** (los sacás del JSON del Paso 3 o de la pantalla de credenciales de Google Cloud):
 
 ```bash
-npm install googleapis
+# --- Obligatorias ---
+GOOGLE_CLIENT_ID=tu-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=tu-client-secret
+
+# --- Opcionales (podés dejarlas vacías o borrarlas) ---
+GOOGLE_REDIRECT_URI=http://localhost:3000
+SOURCE_REFRESH_TOKEN=
+DEST_REFRESH_TOKEN=
+DEST_PLAYLIST_TITLE=Mi Playlist Migrada
+DEST_PRIVACY_STATUS=private
 ```
+
+Sin las dos obligatorias, el script corta con un error como `Falta la variable de entorno GOOGLE_CLIENT_ID`.
+
+### Detalle de cada variable
+
+| Variable | ¿Obligatoria? | Valor por defecto | Cuándo / para qué se usa |
+| --- | --- | --- | --- |
+| `GOOGLE_CLIENT_ID` | Sí | — | Identifica tu app ante Google. Se usa al crear el cliente OAuth. |
+| `GOOGLE_CLIENT_SECRET` | Sí | — | Secreto de tu app. Va junto al Client ID en el OAuth. |
+| `GOOGLE_REDIRECT_URI` | No | `http://localhost:3000` | A dónde vuelve Google tras el login. Cambiala solo si usás otro puerto. |
+| `SOURCE_REFRESH_TOKEN` | No | (vacío) | Token de la cuenta origen. Si lo cargás, se saltea el login por navegador de origen. |
+| `DEST_REFRESH_TOKEN` | No | (vacío) | Token de la cuenta destino. Si lo cargás, se saltea el login por navegador de destino. |
+| `DEST_PLAYLIST_TITLE` | No | Título de la playlist origen (o `Mi Playlist Migrada`) | Nombre de la playlist nueva. Se usa al crearla en el destino. |
+| `DEST_PRIVACY_STATUS` | No | `private` | Privacidad de la playlist nueva (`private`, `public` o `unlisted`). Se usa al crearla. |
+
+> **Cuándo entran en juego los refresh tokens:** el script prioriza el `.env`. Si `SOURCE_REFRESH_TOKEN` / `DEST_REFRESH_TOKEN` están cargados, los usa directo y se saltea el navegador. Si están vacíos, hace el login por navegador y guarda el resultado en `.youtube-refresh-tokens.json` para reutilizarlo en las próximas corridas.
+
+## Paso 5: Instalar las dependencias del proyecto
+
+El proyecto ya trae su `package.json` con todo lo necesario (`googleapis` y `dotenv`). No hace falta agregar paquetes a mano: abrí la terminal en la carpeta del proyecto e instalá lo que ya está declarado. Eso descarga las librerías en la carpeta `node_modules`.
 
 Con `pnpm`:
 
 ```bash
-pnpm add googleapis
+pnpm install
 ```
 
-## Paso 5: Ejecutar el flujo con un solo comando
+Con `npm`:
 
-La primera vez que corras el script, va a abrir el navegador para autorizar la cuenta origen y después la cuenta destino. Cuando termina de guardar los refresh tokens en `.youtube-refresh-tokens.json`, arranca la migración.
+```bash
+npm install
+```
 
-Después, en las siguientes ejecuciones, reutiliza automáticamente esas credenciales y va directo a migrar.
+## Paso 6: Ejecutar el flujo con un solo comando
 
 ```bash
 pnpm run start
 ```
 
+La primera vez que corras el script, va a abrir el navegador para autorizar la cuenta origen y después la cuenta destino. Cuando termina de guardar los refresh tokens en `.youtube-refresh-tokens.json`, arranca la migración.
+
+Después, en las siguientes ejecuciones, reutiliza automáticamente esas credenciales y va directo a migrar.
+
+
+El flujo paso a paso queda así:
+
+1. Aviso **CUENTA ORIGEN** → (pausa 2.5s) → se abre el navegador → login origen.
+2. Aviso **CUENTA DESTINO** → (pausa 2.5s) → se abre el navegador → login destino.
+3. `Ingresá el ID o la URL de la playlist ORIGEN:`
+4. Lee la playlist origen → guarda `playlist-<id>.json`.
+5. Migra → guarda el `destPlaylistId` dentro del JSON.
+6. Próxima corrida con el **mismo ID** → reanuda sola, sin duplicar.
+
+Primero se autentican las dos cuentas (el login no consume cuota de la API) y recién después se pide el ID, así la migración corre de corrido sin frenarse a mitad de camino para pedir un segundo login.
+
 Si preferís cargar los tokens manualmente en `.env`, también podés hacerlo. En ese caso el script usa primero lo que encuentre en variables de entorno y, si no hay nada, usa el archivo local cacheado.
 
-## 6. Configurar el proyecto para JavaScript moderno
 
-Usá un archivo `.js` normal con sintaxis ESM. No necesitás `.mjs`.
-
-Si tu proyecto no tiene `package.json`, crealo. Si ya existe, agregá:
-
-```json
-{
-  "type": "module"
-}
-```
-
-Con eso podés usar `import` y `export` directamente en `.js`.
-
-## 7. Configurar OAuth
-
-La migración se hace en dos autenticaciones separadas:
-
-- Cuenta origen: para leer la playlist.
-- Cuenta destino: para crear la nueva playlist y agregar los videos.
-
-Ejemplo de configuración:
-
-```js
-import { google } from "googleapis";
-
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI || "http://localhost:3000/oauth2callback"
-);
-
-const youtube = google.youtube({ version: "v3", auth: oauth2Client });
-```
-
-Si necesitás repasar el flujo completo de OAuth 2.0 de Google, revisá la [documentación oficial](https://developers.google.com/identity/protocols/oauth2?hl=es-419).
-
-## 8. Generar la URL de autorización
-
-Antes de ejecutar el script, tenés que autorizar tu cuenta de YouTube:
-
-```js
-const scopes = ["https://www.googleapis.com/auth/youtube"];
-const authUrl = oauth2Client.generateAuthUrl({
-  access_type: "offline",
-  scope: scopes,
-});
-
-console.log("Visita esta URL para autenticar:", authUrl);
-```
-
-Pasos:
-
-1. Abrí la URL en el navegador.
-2. Iniciá sesión en la cuenta que quieras usar.
-3. Copiá el código de autorización que te devuelve Google.
-
-## 9. Intercambiar el código por tokens
-
-```js
-const { tokens } = await oauth2Client.getToken("CODIGO_DE_AUTORIZACION");
-oauth2Client.setCredentials(tokens);
-console.log("Autenticación completada.");
-```
-
-Importante: primero hacé este proceso con la cuenta origen y después repetilo con la cuenta destino.
-
-## 10. Leer los videos de la playlist origen
-
-Con la cuenta origen autenticada, podés obtener los IDs de los videos de la playlist:
-
-```js
-async function getPlaylistItems(playlistId) {
-  const res = await youtube.playlistItems.list({
-    part: "snippet",
-    playlistId,
-    maxResults: 50,
-  });
-
-  return res.data.items.map((item) => item.snippet.resourceId.videoId);
-}
-```
-
-## 11. Crear la playlist destino
-
-Con la cuenta destino autenticada, creás una nueva playlist:
-
-```js
-async function createPlaylist(title) {
-  const res = await youtube.playlists.insert({
-    part: "snippet,status",
-    requestBody: {
-      snippet: { title },
-      status: { privacyStatus: "private" },
-    },
-  });
-
-  return res.data.id;
-}
-```
-
-## 12. Agregar videos a la playlist destino
-
-Una vez creada la playlist, agregás cada video uno por uno:
-
-```js
-async function addVideoToPlaylist(playlistId, videoId) {
-  await youtube.playlistItems.insert({
-    part: "snippet",
-    requestBody: {
-      snippet: {
-        playlistId,
-        resourceId: { kind: "youtube#video", videoId },
-      },
-    },
-  });
-}
-```
-
-## 13. Cuotas de la API y reanudación
+## Paso 7: Cuotas de la API y reanudación
 
 Antes de migrar playlists grandes, tenés que entender el límite más importante de la YouTube Data API: la **cuota diaria**.
 
@@ -229,25 +156,8 @@ Y lo mejor es el costo: **leer es 50 veces más barato que escribir**. Por ejemp
 
 Pagás **4 unidades** de lectura para ahorrarte **9.050** de escritura inútil (y, de paso, evitás los duplicados). Esa es la diferencia entre un proceso fiable y uno frágil.
 
-## 14. Ejecutar el flujo completo
 
-```js
-async function migratePlaylist() {
-  const origen = "ID_DE_TU_PLAYLIST_ORIGEN";
-  const videos = await getPlaylistItems(origen);
-
-  const destino = await createPlaylist("Mi Playlist Migrada");
-
-  for (const videoId of videos) {
-    await addVideoToPlaylist(destino, videoId);
-    console.log(`Agregado: ${videoId}`);
-  }
-}
-
-await migratePlaylist();
-```
-
-## 15. Notas importantes
+## Paso 8: Notas importantes
 
 - La primera vez podés dejar que el script haga toda la autorización y guarde los tokens por vos.
 - Si preferís, también podés seguir usando los comandos separados para generar la URL e intercambiar el código.
@@ -256,16 +166,8 @@ await migratePlaylist();
 - Una API key sola no sirve para escribir en la cuenta.
 - Este método sirve también para playlists grandes, como migraciones de cientos de videos.
 
-## 16. Resumen rápido
 
-1. Creás credenciales OAuth en Google Cloud.
-2. Instalás `googleapis`.
-3. Autorizás la cuenta origen y leés los videos.
-4. Autorizás la cuenta destino.
-5. Creás una playlist nueva.
-6. Copiás los videos a la playlist destino.
-
-## 17. Conclusión
+## Paso 9: Conclusión
 
 Este enfoque es:
 
