@@ -50,7 +50,6 @@ GOOGLE_CLIENT_SECRET=tu-client-secret
 GOOGLE_REDIRECT_URI=http://localhost:3000
 SOURCE_REFRESH_TOKEN=
 DEST_REFRESH_TOKEN=
-DEST_PLAYLIST_TITLE=Mi Playlist Migrada
 DEST_PRIVACY_STATUS=private
 ```
 
@@ -65,7 +64,6 @@ Sin las dos obligatorias, el script corta con un error como `Falta la variable d
 | `GOOGLE_REDIRECT_URI` | No | `http://localhost:3000` | A dónde vuelve Google tras el login. Cambiala solo si usás otro puerto. |
 | `SOURCE_REFRESH_TOKEN` | No | (vacío) | Token de la cuenta origen. Si lo cargás, se saltea el login por navegador de origen. |
 | `DEST_REFRESH_TOKEN` | No | (vacío) | Token de la cuenta destino. Si lo cargás, se saltea el login por navegador de destino. |
-| `DEST_PLAYLIST_TITLE` | No | Título de la playlist origen (o `Mi Playlist Migrada`) | Nombre de la playlist nueva. Se usa al crearla en el destino. |
 | `DEST_PRIVACY_STATUS` | No | `private` | Privacidad de la playlist nueva (`private`, `public` o `unlisted`). Se usa al crearla. |
 
 > **Cuándo entran en juego los refresh tokens:** el script prioriza el `.env`. Si `SOURCE_REFRESH_TOKEN` / `DEST_REFRESH_TOKEN` están cargados, los usa directo y se saltea el navegador. Si están vacíos, hace el login por navegador y guarda el resultado en `.youtube-refresh-tokens.json` para reutilizarlo en las próximas corridas.

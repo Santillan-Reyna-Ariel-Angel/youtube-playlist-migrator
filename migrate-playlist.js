@@ -37,7 +37,6 @@ function getConfig() {
     redirectUri: requireEnv("GOOGLE_REDIRECT_URI", DEFAULT_REDIRECT_URI),
     sourceRefreshToken: process.env.SOURCE_REFRESH_TOKEN,
     destRefreshToken: process.env.DEST_REFRESH_TOKEN,
-    destPlaylistTitle: process.env.DEST_PLAYLIST_TITLE,
     destPlaylistId: process.env.DEST_PLAYLIST_ID,
     destPrivacyStatus: process.env.DEST_PRIVACY_STATUS || "private",
   };
@@ -451,8 +450,8 @@ async function importPlaylist(config, data) {
     existingVideoIds = new Set(existing.map((video) => video.videoId));
     console.log(`Videos ya presentes en el destino: ${existingVideoIds.size}`);
   } else {
-    const title =
-      config.destPlaylistTitle || data.playlist?.title || "Mi Playlist Migrada";
+    const sourceTitle = data.playlist?.title;
+    const title = sourceTitle ? `${sourceTitle} IMPORTED` : "Mi Playlist Migrada";
     console.log("Creando playlist destino...");
     destinationPlaylistId = await createPlaylist(
       destYoutube,
