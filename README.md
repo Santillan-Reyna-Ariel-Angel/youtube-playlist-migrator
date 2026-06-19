@@ -1,4 +1,4 @@
-# migrate-playlist-yt
+# youtube-playlist-migrator
 
 Herramienta de línea de comandos para **migrar playlists entre dos cuentas de YouTube** utilizando la API oficial (YouTube Data API v3) con autenticación OAuth 2.0.
 

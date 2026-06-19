@@ -1,5 +1,5 @@
 {
-  "name": "migrate-playlist-yt",
+  "name": "youtube-playlist-migrator",
   "version": "1.0.0",
   "private": true,
   "type": "module",
