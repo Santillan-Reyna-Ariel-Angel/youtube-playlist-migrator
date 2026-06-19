@@ -181,8 +181,6 @@ Se pagan **4 unidades** de lectura para evitar **9.050** de escritura inútil (y
 
 ## Paso 8: Notas importantes
 
-- En la primera ejecución, el script puede realizar toda la autorización y guardar los tokens automáticamente.
-- De preferirlo, también es posible seguir utilizando los comandos separados para generar la URL e intercambiar el código.
 - El Client Secret se obtiene en la misma sección donde se creó el Client ID.
 - Si la playlist es privada, OAuth es obligatorio.
 - Una API key por sí sola no permite escribir en la cuenta.
