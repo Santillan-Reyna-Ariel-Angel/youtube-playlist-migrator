@@ -85,16 +85,21 @@ npm install
 
 ## Paso 6: Ejecutar el flujo con un solo comando
 
+### Comando de ejecución
+
 ```bash
 pnpm run start
 ```
 
+### Primera ejecución
+
 La primera vez que se ejecuta el script, este abre el navegador para autorizar la cuenta origen y luego la cuenta destino. Una vez que termina de guardar los refresh tokens en `.youtube-refresh-tokens.json`, comienza la migración.
 
-En las ejecuciones siguientes, el script reutiliza automáticamente esas credenciales y procede directamente a migrar.
+### Ejecuciones siguientes
 
+El script reutiliza automáticamente las credenciales guardadas (refresh tokens) y procede directamente a migrar.
 
-El flujo paso a paso es el siguiente:
+### Flujo paso a paso
 
 1. Aviso **CUENTA ORIGEN** → (pausa 2.5s) → se abre el navegador → login origen.
 2. Aviso **CUENTA DESTINO** → (pausa 2.5s) → se abre el navegador → login destino.
@@ -104,6 +109,26 @@ El flujo paso a paso es el siguiente:
 6. Próxima ejecución con el **mismo ID** → se reanuda automáticamente, sin duplicar.
 
 Primero se autentican las dos cuentas (el login no consume cuota de la API) y recién después se solicita el ID, de modo que la migración se ejecute de corrido sin detenerse.
+
+### Cómo luce el ID o la URL de la playlist
+
+Cuando el script solicita la playlist origen, se acepta tanto la **URL completa** como el **ID** de la playlist. Ambos formatos son válidos.
+
+**URL completa** (tal como aparece en el navegador):
+
+```
+https://www.youtube.com/playlist?list=PLVuXIO9cPwykCEyg0bec-VldXdpDgz6XZ
+```
+
+**ID de la playlist** (el valor del parámetro `list=` dentro de la URL):
+
+```
+PLVuXIO9cPwykCEyg0bec-VldXdpDgz6XZ
+```
+
+El ID es la porción que sigue a `list=` en la URL. El script extrae automáticamente ese identificador cuando se pega la URL completa, por lo que no es necesario recortarla manualmente.
+
+### Carga manual de tokens
 
 Si se prefiere cargar los tokens manualmente en `.env`, también es posible. En ese caso el script utiliza primero lo que encuentre en las variables de entorno y, si no hay nada, recurre al archivo local cacheado.
 
@@ -132,7 +157,7 @@ Dado que agregar cada video cuesta 50 unidades:
 
 Si una playlist tiene más de ~200 videos, **se necesitan varios días** para migrarla completa. No se trata de un error: es el límite impuesto por Google. Al superarlo, la API devuelve el error `quotaExceeded`.
 
-La cuota se **reinicia a medianoche hora del Pacífico (PT)**. Si se requiere un límite mayor, es posible solicitar un aumento desde Google Cloud Console (es un trámite que Google revisa manualmente).
+La cuota se **reinicia a medianoche hora del Pacífico (3 AM para Bolivia)**. Si se requiere un límite mayor, es posible solicitar un aumento desde Google Cloud Console (es un trámite que Google revisa manualmente).
 
 ### Reanudar sin duplicar (idempotencia)
 
