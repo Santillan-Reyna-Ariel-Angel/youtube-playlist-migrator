@@ -356,15 +356,58 @@ async function authorizeAccount(config, accountLabel) {
   return tokens.refresh_token;
 }
 
+// Google devuelve invalid_grant (HTTP 400/401) cuando el refresh token expiró
+// o fue revocado. Es el único caso que tratamos como "token muerto": cualquier
+// otro error (red, config) debe propagarse, no silenciarse.
+function isInvalidGrant(error) {
+  const payloadError = error?.response?.data?.error;
+  return (
+    payloadError === "invalid_grant" ||
+    error?.status === 401 ||
+    /invalid_grant/i.test(error?.message || "")
+  );
+}
+
+// Verifica un refresh token forzando un refresh del access token. Pega contra
+// el endpoint de OAuth, NO contra la YouTube Data API, así que no gasta cuota.
+async function validateRefreshToken(config, refreshToken) {
+  const client = createOAuthClient(config);
+  client.setCredentials({ refresh_token: refreshToken });
+
+  try {
+    await client.getAccessToken();
+    return true;
+  } catch (error) {
+    if (isInvalidGrant(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function resolveRefreshToken(config, accountLabel, envToken, store) {
+  // Probamos los tokens guardados (primero el de .env, luego el cacheado) y nos
+  // quedamos con el PRIMERO que siga siendo válido. Así un token vencido en .env
+  // ya no rompe el flujo: cae a la cache, y si tampoco sirve, pide login nuevo.
+  const candidates = [];
   if (envToken) {
-    return envToken;
+    candidates.push({ token: envToken, source: ".env" });
+  }
+  const cached = store?.[accountLabel]?.refreshToken;
+  if (cached) {
+    candidates.push({ token: cached, source: "cache local" });
   }
 
-  if (store?.[accountLabel]?.refreshToken) {
-    return store[accountLabel].refreshToken;
+  for (const candidate of candidates) {
+    if (await validateRefreshToken(config, candidate.token)) {
+      return candidate.token;
+    }
+    console.warn(
+      `El refresh token de "${accountLabel}" (${candidate.source}) expiró o fue revocado.`
+    );
   }
 
+  // Ningún token guardado sirve → login en el navegador y se cachea el nuevo.
   const refreshToken = await authorizeAccount(config, accountLabel);
   store[accountLabel] = {
     refreshToken,
@@ -537,18 +580,42 @@ async function importPlaylistFromFile(config, filePath) {
   return result;
 }
 
-// Atajo: exporta y luego importa desde el archivo recién creado.
-// El JSON es la única fuente de verdad, así migrate e import se comportan igual.
-async function migrate(config) {
-  // SETUP: autenticamos ambas cuentas PRIMERO (el login no consume cuota de la API),
-  // de corrido, para no frenar la migración a mitad de camino pidiendo un segundo login.
-  // resolveRefreshToken cachea los tokens en disco; las fases siguientes los reutilizan,
-  // así que aunque el ID se ingrese mal después, no hay que volver a loguearse.
-  const tokenStore = await loadTokenStore();
-  await resolveRefreshToken(config, "source", config.sourceRefreshToken, tokenStore);
-  await resolveRefreshToken(config, "dest", config.destRefreshToken, tokenStore);
+// Menú que aparece tras loguear el origen: el usuario decide si migra o solo
+// exporta. Repite hasta recibir una opción válida.
+async function promptAction() {
+  console.log("\n¿Qué querés hacer?");
+  console.log("  1) Migrar la playlist (origen → destino)");
+  console.log("  2) Solo exportar la playlist a JSON");
 
-  // EJECUCIÓN: ya autenticados, pedimos el ID y migramos.
+  while (true) {
+    const answer = await promptInput("Elegí una opción (1/2): ");
+    if (answer === "1") return "migrate";
+    if (answer === "2") return "export";
+    console.log("Opción inválida. Ingresá 1 o 2.");
+  }
+}
+
+// Flujo principal: autentica el ORIGEN, pregunta qué hacer y, según la elección,
+// solo exporta o migra completo. El JSON es la única fuente de verdad, así
+// migrate e import se comportan igual.
+async function migrate(config) {
+  const tokenStore = await loadTokenStore();
+
+  // Login de la cuenta ORIGEN primero (el login no consume cuota de la API).
+  await resolveRefreshToken(config, "source", config.sourceRefreshToken, tokenStore);
+
+  // Recién con el origen autenticado, el usuario elige qué hacer.
+  const action = await promptAction();
+
+  if (action === "export") {
+    // Solo exportar: no hace falta loguear el destino. Pide el ID, lee y guarda.
+    await exportPlaylist(config);
+    return;
+  }
+
+  // Migrar: autenticamos el DESTINO antes de pedir el ID, para no frenar a mitad
+  // de camino pidiendo un segundo login. Luego seguimos con el flujo completo.
+  await resolveRefreshToken(config, "dest", config.destRefreshToken, tokenStore);
   const exportPath = await exportPlaylist(config);
   return importPlaylistFromFile(config, exportPath);
 }
