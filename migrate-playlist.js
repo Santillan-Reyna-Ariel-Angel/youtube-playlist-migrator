@@ -277,6 +277,63 @@ async function getPlaylistItems(youtube, playlistId) {
   return items;
 }
 
+// La duración no viene en playlistItems.list: hay que pedirla a videos.list,
+// que acepta hasta 50 IDs por llamada y cuesta 1 unidad de cuota por lote.
+async function fetchDurations(youtube, videoIds) {
+  const durations = new Map();
+
+  for (let i = 0; i < videoIds.length; i += 50) {
+    const batch = videoIds.slice(i, i + 50);
+    const response = await youtube.videos.list({
+      part: "contentDetails",
+      id: batch.join(","),
+      maxResults: 50,
+    });
+
+    for (const item of response.data.items || []) {
+      durations.set(item.id, item.contentDetails?.duration || null);
+    }
+  }
+
+  return durations;
+}
+
+// Convierte la duración ISO 8601 de YouTube (ej. "PT1H2M30S") a algo legible
+// ("1:02:30" o "2:30"). Devuelve null si no hay dato.
+function formatDuration(isoDuration) {
+  if (!isoDuration) {
+    return null;
+  }
+
+  const match = isoDuration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  if (!match) {
+    return null;
+  }
+
+  const hours = Number(match[1] || 0);
+  const minutes = Number(match[2] || 0);
+  const seconds = Number(match[3] || 0);
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+    : `${minutes}:${pad(seconds)}`;
+}
+
+// Agrega duration (ISO 8601) y durationText (legible) a cada video, in place.
+async function attachDurations(youtube, items) {
+  const durations = await fetchDurations(
+    youtube,
+    items.map((item) => item.videoId)
+  );
+
+  for (const item of items) {
+    const iso = durations.get(item.videoId) || null;
+    item.duration = iso;
+    item.durationText = formatDuration(iso);
+  }
+}
+
 async function createPlaylist(youtube, title, privacyStatus) {
   const response = await youtube.playlists.insert({
     part: "snippet,status",
@@ -439,6 +496,9 @@ async function exportPlaylist(config) {
   const items = await getPlaylistItems(sourceYoutube, sourcePlaylistId);
   console.log(`Playlist origen: ${playlistInfo.title}`);
   console.log(`Videos encontrados: ${items.length}`);
+
+  console.log("Obteniendo duración de cada video...");
+  await attachDurations(sourceYoutube, items);
 
   const exportPath = await savePlaylistExport(playlistInfo, items);
   console.log(`Backup guardado en: ${exportPath}`);
