@@ -17,4 +17,5 @@ pnpm-debug.log*
 
 .DS_Store
 Thumbs.db
-.ideas/*
+# Ignorar todo el contenido de la carpeta ideas/
+ideas/
